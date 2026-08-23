@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Run a command inside a nixpak sandbox rooted at the current directory."""
+
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+SANDBOX_NIX = Path(__file__).resolve().parent / "sandbox.nix"
+
+# Enter the project directory, then replace the shell with the command so that
+# exit codes and signals pass through untouched.
+RUN_ARGS = ["-c", 'cd "$NIXULATE_DIR" && exec "$@"', "--"]
+
+GROUP_SEARCH_TIMEOUT = 5.0
+
+
+def main() -> None:
+    project = Path.cwd()
+    shell = build_sandbox(project) / "bin" / "bash"
+    command = [str(shell)] + (RUN_ARGS + sys.argv[1:] if sys.argv[1:] else [])
+
+    os.environ["NIXULATE_DIR"] = str(project)
+
+    terminal = open_terminal()
+    if terminal is None:
+        os.execv(shell, command)
+    sys.exit(run_owning_terminal(command, terminal))
+
+
+def build_sandbox(project: Path) -> Path:
+    args = ["nix-build", str(SANDBOX_NIX), "--no-out-link"]
+    for name, config in configs(project):
+        args += ["--arg", name, f"import {config}"]
+
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr)
+        sys.exit(result.returncode)
+    return Path(result.stdout.strip())
+
+
+def configs(project: Path) -> list[tuple[str, Path]]:
+    """The user's config first, so a project may extend it. Neither wins by
+    itself: nixpak merges them, and a clash needs lib.mkForce."""
+    candidates = [("userConfig", user_config_dir() / "nixulate.nix"),
+                  ("projectConfig", project / "nixulate.nix")]
+    return [(name, path) for name, path in candidates if path.is_file()]
+
+
+def user_config_dir() -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+
+
+def run_owning_terminal(command: list[str], terminal: int) -> int:
+    """Give the sandbox the terminal's foreground process group.
+
+    nixpak starts bwrap in a new process group and never claims the terminal,
+    and the sandbox runs in its own PID namespace where its process group reads
+    back as 0. So it can neither be the foreground group by accident nor make
+    itself one: any read from the terminal raises SIGTTIN and stops it. Only
+    this side of the sandbox knows the real process group ids.
+    """
+    caller_group = os.tcgetpgrp(terminal)
+    signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+
+    child = subprocess.Popen(command)
+    group = sandbox_group(child.pid)
+    if group is not None:
+        os.tcsetpgrp(terminal, group)
+        os.killpg(group, signal.SIGCONT)  # in case it already stopped on SIGTTIN
+
+    status = wait_ignoring_interrupts(child)
+    os.tcsetpgrp(terminal, caller_group)
+    return 128 - status if status < 0 else status
+
+
+def wait_ignoring_interrupts(child: subprocess.Popen) -> int:
+    """The sandbox owns the terminal, so it receives Ctrl-C, not this process.
+    A signal can still arrive before the handover, and the sandbox is the one
+    that decides what to do with it."""
+    while True:
+        try:
+            return child.wait()
+        except KeyboardInterrupt:
+            continue
+
+
+def sandbox_group(launcher: int) -> int | None:
+    """The process group of the sandbox, or None if it never appeared.
+
+    nixpak's launcher starts the sandbox with setpgid, so the sandbox is the
+    child whose process group id is its own pid. Its other children, such as the
+    D-Bus proxy, keep the launcher's group.
+    """
+    deadline = time.monotonic() + GROUP_SEARCH_TIMEOUT
+    while time.monotonic() < deadline:
+        for child in launcher_children(launcher):
+            if process_group(child) == child:
+                return child
+        time.sleep(0.01)
+    return None
+
+
+def launcher_children(launcher: int) -> list[int]:
+    """Every thread of the launcher is asked, because it is a Go program and its
+    runtime may start the sandbox from any thread. Each thread only reports the
+    children it started itself."""
+    children = []
+    try:
+        threads = list(Path(f"/proc/{launcher}/task").iterdir())
+    except OSError:
+        return []
+    for thread in threads:
+        try:
+            listing = (thread / "children").read_text()
+        except OSError:
+            continue
+        children += [int(pid) for pid in listing.split()]
+    return children
+
+
+def process_group(pid: int) -> int | None:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    # The command field may contain spaces, so parse after its closing bracket.
+    return int(stat[stat.rindex(")") + 2:].split()[2])
+
+
+def open_terminal() -> int | None:
+    try:
+        return os.open("/dev/tty", os.O_RDWR)
+    except OSError:
+        return None
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)
