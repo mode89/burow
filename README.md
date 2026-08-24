@@ -1,82 +1,123 @@
 # nixulate
 
-Run a command in a [nixpak](https://github.com/nixpak/nixpak) sandbox rooted at the current directory.
+Run a command in a Bubblewrap sandbox rooted at the current directory.
 
 ```sh
 cd ~/projects/scratch
 nixulate npm install
 ```
 
-`npm` runs with the project directory as the only writable path. The rest of your home is not there. `~/.ssh`, `~/.aws`, other projects: invisible.
+`npm` can write to the project directory. The rest of your home, including `~/.ssh`, `~/.aws`, and other projects, is replaced by an empty temporary filesystem.
 
-Run with no arguments to get a shell inside the sandbox:
+Run with no arguments to start Bash inside the sandbox:
 
 ```sh
 nixulate
 ```
 
-## What is allowed by default
+## Default access
 
-- **Write** — the current directory, and nothing else.
-- **Read** — `/nix/store`, `/etc`, the system and user Nix profiles.
-- **Network** — on.
-- **GPU, Wayland, X11, audio** — on.
-- **D-Bus** — proxy runs, but every bus name is closed.
-- **Nix** — `nix-shell`, `nix-build` and `nix` work, through the host's Nix daemon.
+- **Write** — the current directory, a private `$HOME`, and a private `/tmp`. Only direct filesystem writes to the current directory persist through sandbox mounts; host services can make other persistent changes.
+- **Read** — the Nix store and profiles, selected system files, and programs available through those mounts. The host `PATH` is inherited, but entries under hidden paths do not work.
+- **Network** — the host network is shared.
+- **Devices** — a private `/dev` is created and `/dev/kvm` is passed through.
+- **D-Bus** — the user session bus is passed through without filtering.
+- **Nix** — `nix-shell`, `nix-build`, and `nix` use the host Nix daemon.
+- **Environment** — inherited, including any credentials stored in environment variables.
 
-Host tools resolve normally, so `git`, `node` and the rest of your `PATH` work without being declared.
-
-This is a **loose** sandbox. It stops accidents and casual snooping. It is not built to hold a determined attacker, and enabling GUI or D-Bus access widens it further.
-
-The Nix daemon socket is another such widening. Code in the sandbox can run builds and add paths to your real store. It cannot write to your files, and it cannot raise its own trust level, because the daemon decides that from `trusted-users`. To close it:
-
-```nix
-{ lib, ... }:
-{
-  bubblewrap.bind.rw = lib.mkForce [ "$NIXULATE_DIR" ];
-}
-```
+This is a convenience-first sandbox that limits accidental filesystem access. It is not a security boundary for hostile code. Network access, the unfiltered session bus, inherited environment variables, KVM, and the Nix daemon all expose host resources. In particular, the Nix daemon can add paths to the host store.
 
 ## Install
 
-Needs Nix with `nix-build`, `<nixpkgs>` on your `NIX_PATH`, and a Linux kernel with user namespaces.
+The defaults target NixOS and require:
 
-The sandbox is built from your own nixpkgs, not a pinned copy. It therefore shares store paths with your system instead of downloading a second closure, and it changes when you update your channel.
+- Python 3 and a populated `USER` environment variable.
+- Nix with `nix-shell`, `<nixpkgs>` available through the legacy Nix path, and a multi-user daemon socket at `/nix/var/nix/daemon-socket`.
+- A Linux kernel with user namespaces.
+- `/dev/kvm` and an active user D-Bus socket at `/run/user/$UID/bus`.
+- The NixOS paths bound by `bwrap_options()`, including the CA certificate, Nix configuration and profiles, `/run/current-system/sw`, `/usr/bin/env`, and `/bin/sh`.
+
+Install the single executable:
 
 ```sh
 git clone <this repo> ~/src/nixulate
 ln -s ~/src/nixulate/nixulate ~/.local/bin/nixulate
 ```
 
-Keep `nixulate` and `sandbox.nix` in the same directory: the script finds the Nix file next to itself.
+Each invocation uses `nix-shell --packages bubblewrap` and then replaces itself with `bwrap`. The first run may download Bubblewrap; later runs reuse the Nix store.
 
-## Per-project configuration
+## Configuration
 
-Drop a `nixulate.nix` in the project directory to extend the sandbox, or a `~/.config/nixulate.nix` to extend every sandbox:
+Configuration is Python. It runs on the host before the sandbox starts, so use configuration only from projects you trust.
 
-```nix
-{
-  bubblewrap.bind.rw = [ "$HOME/.cache/pip" ];
-  dbus.policies."org.freedesktop.Notifications" = "talk";
-}
+The following files are optional and load in order:
+
+1. `$XDG_CONFIG_HOME/nixulate/config.py`, or `~/.config/nixulate/config.py` when `XDG_CONFIG_HOME` is unset.
+2. `./.nixulate/config.py` for shared project configuration.
+3. `./.nixulate/config.local.py` for local project configuration.
+
+A config file imports `nixulate` and overrides a function. The override receives the previous implementation, which lets global, project, and local configuration compose.
+
+Add a read-only host path:
+
+```python
+import nixulate
+
+
+@nixulate.override
+def bwrap_options(previous):
+    return [
+        *previous(),
+        "--ro-bind", "/opt/toolchain", "/opt/toolchain",
+    ]
 ```
 
-Both files are optional and both are nixpak modules, merged into the defaults. See [OPTIONS.md](OPTIONS.md).
+Add packages to the outer `nix-shell`, making their programs available through `PATH` inside the sandbox:
 
-## Speed
+```python
+import nixulate
 
-The first run builds the sandbox and may take a few minutes. After that every run costs about 0.9 seconds of Nix evaluation.
 
-Nothing is cached outside the Nix store, and no garbage collection root is kept. If `nix-collect-garbage` removes the sandbox, the next run rebuilds it.
+@nixulate.override
+def nix_shell_packages(previous):
+    return [*previous(), "nodejs_22"]
+```
+
+Disable network access. `--unshare-all` already creates a network namespace; this removes the later option that shares the host network:
+
+```python
+import nixulate
+
+
+@nixulate.override
+def bwrap_options(previous):
+    return [option for option in previous() if option != "--share-net"]
+```
+
+Use the explicit decorator form when the wrapper has a different name:
+
+```python
+import nixulate
+
+
+@nixulate.override(nixulate.bwrap_options)
+def add_toolchain(previous):
+    return [
+        *previous(),
+        "--ro-bind", "/opt/toolchain", "/opt/toolchain",
+    ]
+```
+
+An override can replace a function completely by not calling `previous`. Bubblewrap option order is significant, so inspect `bwrap_options()` before replacing defaults or adding mounts that overlap them.
+
+Config directories are added to Python's import path. A config can therefore move helper code into adjacent Python modules.
 
 ## How it works
 
-1. `nixulate` looks for `~/.config/nixulate.nix` and `./nixulate.nix`.
-2. It runs `nix-build sandbox.nix` passing whichever it found as `--arg userConfig` and `--arg projectConfig`. The result is a wrapper around `bwrap`.
-3. It sets `NIXULATE_DIR` to the current directory and `execv`s the wrapper.
+1. `nixulate` imports the global, project, and local Python configuration files that exist.
+2. It gets Bubblewrap arguments from `bwrap_options()` and packages from `nix_shell_packages()`.
+3. It runs `nix-shell --packages ... --run ...` to provide Bubblewrap.
+4. Bubblewrap requests isolation for every supported namespace, then shares the host network and mounts the allowed paths. User and cgroup namespace creation are best-effort Bubblewrap operations.
+5. The requested command runs directly under Bubblewrap in the current directory.
 
-`sandbox.nix` binds the string `"$NIXULATE_DIR"`, which nixpak resolves at launch. So one build serves every project, and the sandbox is only rebuilt when either `nixulate.nix` changes.
-
-Exit codes and signals pass through. One exception: Ctrl-C reports 255 instead of 130, because the interrupt also reaches `bwrap`, and nixpak's launcher turns any signal death into 255.
-
-When there is a terminal, `nixulate` waits for the sandbox instead of replacing itself, and hands the terminal's foreground process group to it. This is needed because nixpak starts the sandbox in a new process group without claiming the terminal, and the sandbox runs in its own PID namespace where its own process group reads back as `0`. Without this, any program that reads the keyboard, such as `htop` or `less`, is stopped by `SIGTTIN` and shows nothing.
+Exit codes and signals pass through. Interactive programs use the calling terminal directly.

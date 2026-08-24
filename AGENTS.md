@@ -1,77 +1,95 @@
 # Working on nixulate
 
-`nixulate <cmd>` runs `<cmd>` in a [nixpak](https://github.com/nixpak/nixpak) sandbox where only the current directory is writable. See README.md for behaviour and OPTIONS.md for the `nixulate.nix` schema.
+`nixulate <cmd>` runs `<cmd>` directly under `bwrap`, with the current directory as the only persistent writable filesystem bind. `nix-shell` provides Bubblewrap at launch time.
 
-Four files, no build step, no test framework:
+The project has one executable and no build step or test framework:
 
-- `nixulate` — Python. Builds the sandbox, hands it the terminal, execs it.
-- `sandbox.nix` — the nixpak module holding every default.
-- `OPTIONS.md`, `README.md` — the only docs.
+- `nixulate` — Python. Loads configuration, defines the sandbox policy, asks `nix-shell` for runtime packages, and replaces itself with the sandboxed command.
+- `README.md` — user documentation and configuration examples.
+- `AGENTS.md` — maintainer instructions.
+- `MEMORY.md` — curated context that is not recoverable cheaply from the other files.
 
-Policy belongs in `sandbox.nix`. `nixulate` should stay limited to building, terminal handover and exec.
+Sandbox policy belongs in `bwrap_options()`. Packages needed to start the sandbox belong in `nix_shell_packages()`. Keep configuration loading in `load_config()` and process launch in `main()`.
+
+## Configuration model
+
+Configuration is trusted Python executed on the host before the sandbox starts. Files load in this order:
+
+1. `$XDG_CONFIG_HOME/nixulate/config.py`, defaulting to `~/.config/nixulate/config.py`.
+2. `./.nixulate/config.py`.
+3. `./.nixulate/config.local.py`.
+
+Each file can `import nixulate` and use `@nixulate.override` to wrap a function. The wrapper receives the previous implementation as its first argument, so later files wrap earlier files. A wrapper may call the previous function to extend it or omit that call to replace it.
 
 ## Verify
 
-There are no unit tests. Run these after any change.
+There are no unit tests. Run these after a change.
 
-Sandbox builds:
+Python and documentation syntax:
 
 ```sh
-nix-build sandbox.nix --no-out-link
+python3 -m py_compile nixulate
+python3 - <<'PY'
+import re
+from pathlib import Path
+for block in re.findall(r'```python\n(.*?)```', Path('README.md').read_text(), re.S):
+    compile(block, 'README.md', 'exec')
+PY
 ```
 
-Every Nix example in the docs builds:
+Configuration order and override chaining:
 
 ```sh
-python3 -c "
-import re, pathlib
-b = sum((re.findall(r'\`\`\`nix\n(.*?)\`\`\`', pathlib.Path(f).read_text(), re.S) for f in ('OPTIONS.md', 'README.md')), [])
-for i, x in enumerate(b): pathlib.Path(f'/tmp/ex{i}.nix').write_text(x)
-print(len(b), 'examples')"
-for f in /tmp/ex*.nix; do nix-build sandbox.nix --arg projectConfig "import $f" --no-out-link >/dev/null || echo "FAIL $f"; done
+repo=$PWD
+tmp=$(mktemp -d -p "$repo")
+trap 'rm -rf "$tmp"' EXIT
+mkdir -p "$tmp/xdg/nixulate" "$tmp/project/.nixulate"
+write_config() {
+    printf 'import nixulate\n@nixulate.override\ndef bwrap_options(previous):\n    return [*previous(), "--setenv", "NIXULATE_CONFIG_ORDER", "%s"]\n' "$2" > "$1"
+}
+write_config "$tmp/xdg/nixulate/config.py" global
+write_config "$tmp/project/.nixulate/config.py" project
+write_config "$tmp/project/.nixulate/config.local.py" local
+(cd "$tmp/project" && XDG_CONFIG_HOME="$tmp/xdg" "$repo/nixulate" sh -c 'test "$NIXULATE_CONFIG_ORDER" = local')
 ```
 
-Isolation and exit codes:
+Isolation, networking, nested Nix, and exit status:
 
 ```sh
-./nixulate sh -c 'touch ./p && echo ok && rm p'   # writable
-./nixulate cat "$HOME/.ssh/id_rsa"                # must fail
+home_marker=$(mktemp "$HOME/.nixulate-test.XXXXXX")
+tmp_marker=$(mktemp /tmp/nixulate-test.XXXXXX)
+trap 'rm -f "$home_marker" "$tmp_marker"' EXIT
+./nixulate sh -c 'test ! -e "$1" && test ! -e "$2"' sh "$home_marker" "$tmp_marker"
+./nixulate sh -c 'touch ./p && echo ok && rm p'
 ./nixulate curl -sI --max-time 8 https://example.com
+./nixulate sh -c 'nix-shell -p hello --run hello'
 ./nixulate false; echo $?                         # 1
 ./nixulate sh -c 'kill -TERM $$'; echo $?         # 143
-./nixulate sh -c 'nix-shell -p hello --run hello'
 ```
 
-Terminal behaviour cannot be checked from a pipe. Drive it through a pty with `pty.fork`, set the window size with `TIOCSWINSZ`, then confirm `htop` renders, redraws after an arrow key, and quits on `q`. A pty without a size reports `stty size` as `0 0` and every TUI stays blank, which looks like a bug in `nixulate` but is not.
+Run an interactive command such as `./nixulate htop` from a real terminal after changes to process launch or namespace options. A pipe is not a terminal and cannot verify keyboard handling.
 
 ## Things that will mislead you
 
-**Bind paths starting with `$` resolve at launch, not at build.** nixpak's `coerceToEnv` turns `"$NIXULATE_DIR"` into a runtime lookup. That is why one build serves every project directory, and why the sandbox is only rebuilt when `nixulate.nix` changes. Do not add per-directory build inputs.
+**Configuration is outside the security boundary.** Config files are imported before `bwrap` starts and can run arbitrary host code. Treat project configuration as trusted code.
 
-**`/nix/store` alone does not make host tools work.** The host `PATH` points into profile symlink trees such as `/run/current-system/sw/bin`. Those are bound separately in `sandbox.nix`. Removing them breaks every command.
+**The environment is inherited.** Files in the host home are hidden, but credentials already stored in environment variables remain visible unless configuration changes the environment.
 
-**The sandbox cannot claim the terminal itself.** nixpak's launcher starts bwrap with `Setpgid: true` and never calls `tcsetpgrp`, and `--unshare-pid` is hardcoded, so inside the sandbox `getpgrp()` and `getsid()` both read `0`. Only `nixulate` knows the real ids, so it must do the handover. Without it any program that reads the keyboard is stopped by `SIGTTIN` and prints nothing, while `echo` still works, because background groups may write but not read.
+**The default host paths are strict.** Launch fails if a source used by `--bind`, `--ro-bind`, or `--dev-bind` does not exist. The defaults assume NixOS paths, `/dev/kvm`, and an active user D-Bus socket.
 
-**Find the sandbox group across all launcher threads.** `/proc/PID/task/TID/children` lists one thread's children. The launcher is a Go program and starts bwrap from an arbitrary thread, so read `/proc/PID/task/*/children`. Reading only the main thread finds nothing and the handover silently does not happen.
+**`/nix/store` alone does not make host tools work.** The inherited `PATH` can include profile symlink trees such as `/run/current-system/sw/bin`, so the default policy binds `/run/current-system/sw` and Nix profiles too.
 
-**Ctrl-C reports 255, not 130.** The interrupt reaches bwrap too, and the launcher does `os.Exit(exiterr.ExitCode())`, which is `-1` for a signal death. Upstream, not fixable here.
+**`NIX_REMOTE=daemon` is required for nested Nix commands.** Binding the daemon socket is not enough. Without the variable, Nix selects the local store and fails when it tries to write into the read-only `/nix/store`.
 
-**`NIX_REMOTE=daemon` is required for `nix-shell`.** Binding the daemon socket is not enough. Without the variable Nix picks the local store and fails writing a lock file into the read-only `/nix/store`.
+**D-Bus is not filtered.** The user bus is bound directly into the sandbox. This and the Nix daemon make the defaults unsuitable as a security boundary for hostile code.
 
-**`bubblewrap.env` values concatenate on clash instead of erroring.** nixpak's env type is a custom `mkOptionType` with no merge rule, so the module system falls back to `mergeDefaultOption`, which joins strings. Two configs both setting `FOO` silently produce the two values stuck together. Other option types conflict properly.
+**`$HOME` and `/tmp` are disposable mounts.** Writes there can succeed but disappear when the command exits. Put test fixtures in the project directory if a later sandbox command must see them.
 
-**nixpak option names are not guessable.** It is `fonts.enable`, not `gui.fonts.enable`. Check the real module before adding an option:
-
-```sh
-nix repl
-:l <nixpak-source>/modules
-```
-
-**Do not pin nixpkgs.** `sandbox.nix` uses the host `<nixpkgs>` on purpose. A pinned nixpkgs shared zero store paths with the system and duplicated a 118 MB closure. Only nixpak is pinned, because it is not on `NIX_PATH`.
+**Bubblewrap option order matters.** Configuration normally appends options to the previous list. Check how a later mount or namespace option interacts with the defaults before assuming it replaces one.
 
 ## Documentation style
 
-No Markdown tables; use lists. Do not hard-wrap lines. Every Nix example must build.
+No Markdown tables; use lists. Do not hard-wrap lines. Every Python example must compile.
 
 ---
 
