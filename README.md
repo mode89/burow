@@ -1,10 +1,10 @@
-# nixulate
+# burow
 
 Run a command in a Bubblewrap sandbox rooted at the current directory.
 
 ```sh
 cd ~/projects/scratch
-nixulate npm install
+burow npm install
 ```
 
 `npm` can write to the project directory. The rest of your home, including `~/.ssh`, `~/.aws`, and other projects, is replaced by an empty temporary filesystem.
@@ -12,7 +12,7 @@ nixulate npm install
 Run with no arguments to start Bash inside the sandbox:
 
 ```sh
-nixulate
+burow
 ```
 
 ## Default access
@@ -40,8 +40,8 @@ The defaults target NixOS and require:
 Install the single executable:
 
 ```sh
-git clone <this repo> ~/src/nixulate
-ln -s ~/src/nixulate/nixulate ~/.local/bin/nixulate
+git clone <this repo> ~/src/burow
+ln -s ~/src/burow/burow ~/.local/bin/burow
 ```
 
 Each invocation uses `nix-shell --packages bubblewrap` and then replaces itself with `bwrap`. The first run may download Bubblewrap; later runs reuse the Nix store.
@@ -52,19 +52,19 @@ Configuration is Python. It runs on the host before the sandbox starts, so use c
 
 The following files are optional and load in order:
 
-1. `$XDG_CONFIG_HOME/nixulate/config.py`, or `~/.config/nixulate/config.py` when `XDG_CONFIG_HOME` is unset.
-2. `./.nixulate/config.py` for shared project configuration.
-3. `./.nixulate/config.local.py` for local project configuration.
+1. `$XDG_CONFIG_HOME/burow/config.py`, or `~/.config/burow/config.py` when `XDG_CONFIG_HOME` is unset.
+2. `./.burow/config.py` for shared project configuration.
+3. `./.burow/config.local.py` for local project configuration.
 
-A config file imports `nixulate` and overrides a function. The override receives the previous implementation, which lets global, project, and local configuration compose.
+A config file imports `burow` and overrides a function. The override receives the previous implementation, which lets global, project, and local configuration compose.
 
 Add a read-only host path:
 
 ```python
-import nixulate
+import burow
 
 
-@nixulate.override
+@burow.override
 def bwrap_options(previous):
     return [
         *previous(),
@@ -75,10 +75,10 @@ def bwrap_options(previous):
 Add packages to the outer `nix-shell`, making their programs available through `PATH` inside the sandbox:
 
 ```python
-import nixulate
+import burow
 
 
-@nixulate.override
+@burow.override
 def nix_shell_packages(previous):
     return [*previous(), "nodejs_22"]
 ```
@@ -86,10 +86,10 @@ def nix_shell_packages(previous):
 Disable network access. `--unshare-all` already creates a network namespace; this removes the later option that shares the host network:
 
 ```python
-import nixulate
+import burow
 
 
-@nixulate.override
+@burow.override
 def bwrap_options(previous):
     return [option for option in previous() if option != "--share-net"]
 ```
@@ -97,10 +97,10 @@ def bwrap_options(previous):
 Use the explicit decorator form when the wrapper has a different name:
 
 ```python
-import nixulate
+import burow
 
 
-@nixulate.override(nixulate.bwrap_options)
+@burow.override(burow.bwrap_options)
 def add_toolchain(previous):
     return [
         *previous(),
@@ -114,7 +114,7 @@ Config directories are added to Python's import path. A config can therefore mov
 
 ## How it works
 
-1. `nixulate` imports the global, project, and local Python configuration files that exist.
+1. `burow` imports the global, project, and local Python configuration files that exist.
 2. It gets Bubblewrap arguments from `bwrap_options()` and packages from `nix_shell_packages()`.
 3. It runs `nix-shell --packages ... --run ...` to provide Bubblewrap.
 4. Bubblewrap requests isolation for every supported namespace, then shares the host network and mounts the allowed paths. User and cgroup namespace creation are best-effort Bubblewrap operations.

@@ -13,9 +13,9 @@ from pathlib import Path
 
 XDG_CONFIG_HOME = Path(
     os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-USER_CONFIG_DIR = XDG_CONFIG_HOME / "nixulate"
+USER_CONFIG_DIR = XDG_CONFIG_HOME / "burow"
 USER_CACHE_DIR = Path(
-    os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "nixulate"
+    os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "burow"
 
 
 def main():
@@ -31,9 +31,9 @@ def main():
 
 
 def load_config():
-    # Alias so config's `import nixulate` finds us, not a second instance.
-    sys.modules.setdefault("nixulate", sys.modules[__name__])
-    project_dir = Path.cwd() / ".nixulate"
+    # Alias so config's `import burow` finds us, not a second instance.
+    sys.modules.setdefault("burow", sys.modules[__name__])
+    project_dir = Path.cwd() / ".burow"
     # Later wins: project dir over global, config.local.py over config.py.
     paths = [
         USER_CONFIG_DIR / "config.py",
@@ -47,7 +47,7 @@ def load_config():
 
 def exec_config(path):
     sys.path.append(str(path.parent))
-    spec = importlib.util.spec_from_file_location("nixulate_config", path)
+    spec = importlib.util.spec_from_file_location("burow_config", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
@@ -81,7 +81,7 @@ def bwrap_options():
         "--tmpfs", str(home),
         "--setenv", "HOME", str(home),
         "--setenv", "USER", os.environ["USER"],
-        "--setenv", "PS1", r"[nixulate] \w \$ ",
+        "--setenv", "PS1", r"[burow] \w \$ ",
         "--bind", dbus, dbus,
         "--setenv", "DBUS_SESSION_BUS_ADDRESS", f"unix:path={dbus}",
         "--bind", str(cwd), str(cwd),
@@ -97,12 +97,12 @@ def nix_shell_packages():
 
 def override(arg):
     """Replace a function, injecting the previous version as the first argument
-    so overrides can chain. Used as ``@nixulate.override`` (replaces
-    ``nixulate.<name>``) or ``@nixulate.override(target)`` (replaces
+    so overrides can chain. Used as ``@burow.override`` (replaces
+    ``burow.<name>``) or ``@burow.override(target)`` (replaces
     ``target`` wherever it lives)."""
     if not callable(arg):
         raise TypeError(
-            f"@nixulate.override expects a function; "
+            f"@burow.override expects a function; "
             f"got {type(arg).__name__}")
     home = sys.modules.get(arg.__module__)
     if home is not None and getattr(home, arg.__name__, None) is arg:
@@ -110,9 +110,9 @@ def override(arg):
     ps_module = sys.modules[__name__]
     if not hasattr(ps_module, arg.__name__):
         raise AttributeError(
-            f"nixulate has no attribute {arg.__name__!r}; for targets "
-            f"outside nixulate, use the explicit form: "
-            f"@nixulate.override(<module>.{arg.__name__})")
+            f"burow has no attribute {arg.__name__!r}; for targets "
+            f"outside burow, use the explicit form: "
+            f"@burow.override(<module>.{arg.__name__})")
     return _install(
         ps_module, arg.__name__, getattr(ps_module, arg.__name__), arg)
 
@@ -122,7 +122,7 @@ def _install(module, name, target, fn):
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         return fn(target, *args, **kwargs)
-    # Rewrite so a later @nixulate.override(wrapper) routes here, not to fn's
+    # Rewrite so a later @burow.override(wrapper) routes here, not to fn's
     # original module.
     wrapper.__module__ = module.__name__
     setattr(module, name, wrapper)

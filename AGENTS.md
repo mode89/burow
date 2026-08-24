@@ -1,10 +1,10 @@
-# Working on nixulate
+# Working on burow
 
-`nixulate <cmd>` runs `<cmd>` directly under `bwrap`, with the current directory as the only persistent writable filesystem bind. `nix-shell` provides Bubblewrap at launch time.
+`burow <cmd>` runs `<cmd>` directly under `bwrap`, with the current directory as the only persistent writable filesystem bind. `nix-shell` provides Bubblewrap at launch time.
 
 The project has one executable and no build step or test framework:
 
-- `nixulate` — Python. Loads configuration, defines the sandbox policy, asks `nix-shell` for runtime packages, and replaces itself with the sandboxed command.
+- `burow` — Python. Loads configuration, defines the sandbox policy, asks `nix-shell` for runtime packages, and replaces itself with the sandboxed command.
 - `README.md` — user documentation and configuration examples.
 - `AGENTS.md` — maintainer instructions.
 - `MEMORY.md` — curated context that is not recoverable cheaply from the other files.
@@ -15,11 +15,11 @@ Sandbox policy belongs in `bwrap_options()`. Packages needed to start the sandbo
 
 Configuration is trusted Python executed on the host before the sandbox starts. Files load in this order:
 
-1. `$XDG_CONFIG_HOME/nixulate/config.py`, defaulting to `~/.config/nixulate/config.py`.
-2. `./.nixulate/config.py`.
-3. `./.nixulate/config.local.py`.
+1. `$XDG_CONFIG_HOME/burow/config.py`, defaulting to `~/.config/burow/config.py`.
+2. `./.burow/config.py`.
+3. `./.burow/config.local.py`.
 
-Each file can `import nixulate` and use `@nixulate.override` to wrap a function. The wrapper receives the previous implementation as its first argument, so later files wrap earlier files. A wrapper may call the previous function to extend it or omit that call to replace it.
+Each file can `import burow` and use `@burow.override` to wrap a function. The wrapper receives the previous implementation as its first argument, so later files wrap earlier files. A wrapper may call the previous function to extend it or omit that call to replace it.
 
 ## Verify
 
@@ -28,7 +28,7 @@ There are no unit tests. Run these after a change.
 Python and documentation syntax:
 
 ```sh
-python3 -m py_compile nixulate
+python3 -m py_compile burow
 python3 - <<'PY'
 import re
 from pathlib import Path
@@ -43,31 +43,31 @@ Configuration order and override chaining:
 repo=$PWD
 tmp=$(mktemp -d -p "$repo")
 trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/xdg/nixulate" "$tmp/project/.nixulate"
+mkdir -p "$tmp/xdg/burow" "$tmp/project/.burow"
 write_config() {
-    printf 'import nixulate\n@nixulate.override\ndef bwrap_options(previous):\n    return [*previous(), "--setenv", "NIXULATE_CONFIG_ORDER", "%s"]\n' "$2" > "$1"
+    printf 'import burow\n@burow.override\ndef bwrap_options(previous):\n    return [*previous(), "--setenv", "BUROW_CONFIG_ORDER", "%s"]\n' "$2" > "$1"
 }
-write_config "$tmp/xdg/nixulate/config.py" global
-write_config "$tmp/project/.nixulate/config.py" project
-write_config "$tmp/project/.nixulate/config.local.py" local
-(cd "$tmp/project" && XDG_CONFIG_HOME="$tmp/xdg" "$repo/nixulate" sh -c 'test "$NIXULATE_CONFIG_ORDER" = local')
+write_config "$tmp/xdg/burow/config.py" global
+write_config "$tmp/project/.burow/config.py" project
+write_config "$tmp/project/.burow/config.local.py" local
+(cd "$tmp/project" && XDG_CONFIG_HOME="$tmp/xdg" "$repo/burow" sh -c 'test "$BUROW_CONFIG_ORDER" = local')
 ```
 
 Isolation, networking, nested Nix, and exit status:
 
 ```sh
-home_marker=$(mktemp "$HOME/.nixulate-test.XXXXXX")
-tmp_marker=$(mktemp /tmp/nixulate-test.XXXXXX)
+home_marker=$(mktemp "$HOME/.burow-test.XXXXXX")
+tmp_marker=$(mktemp /tmp/burow-test.XXXXXX)
 trap 'rm -f "$home_marker" "$tmp_marker"' EXIT
-./nixulate sh -c 'test ! -e "$1" && test ! -e "$2"' sh "$home_marker" "$tmp_marker"
-./nixulate sh -c 'touch ./p && echo ok && rm p'
-./nixulate curl -sI --max-time 8 https://example.com
-./nixulate sh -c 'nix-shell -p hello --run hello'
-./nixulate false; echo $?                         # 1
-./nixulate sh -c 'kill -TERM $$'; echo $?         # 143
+./burow sh -c 'test ! -e "$1" && test ! -e "$2"' sh "$home_marker" "$tmp_marker"
+./burow sh -c 'touch ./p && echo ok && rm p'
+./burow curl -sI --max-time 8 https://example.com
+./burow sh -c 'nix-shell -p hello --run hello'
+./burow false; echo $?                         # 1
+./burow sh -c 'kill -TERM $$'; echo $?         # 143
 ```
 
-Run an interactive command such as `./nixulate htop` from a real terminal after changes to process launch or namespace options. A pipe is not a terminal and cannot verify keyboard handling.
+Run an interactive command such as `./burow htop` from a real terminal after changes to process launch or namespace options. A pipe is not a terminal and cannot verify keyboard handling.
 
 ## Things that will mislead you
 

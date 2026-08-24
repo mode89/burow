@@ -2,4 +2,4 @@ _Reference context — observed facts and standing conventions for this project,
 
 ## Decisions
 
-- nixulate uses the host's legacy nixpkgs lookup without a pinned fallback. Why: a tested pin duplicated a 118 MB closure and added complexity for little benefit.
+- burow uses the host's legacy nixpkgs lookup without a pinned fallback. Why: a tested pin duplicated a 118 MB closure and added complexity for little benefit.
