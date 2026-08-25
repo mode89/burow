@@ -3,6 +3,7 @@
 # pylint: disable=missing-docstring
 
 import functools
+import importlib.machinery
 import importlib.util
 import os
 import shlex
@@ -72,7 +73,10 @@ def load_config(extra_paths=()):
 
 def exec_config(path):
     sys.path.append(str(path.parent))
-    spec = importlib.util.spec_from_file_location("burow_config", path)
+    # An explicit loader accepts config files without a `.py` suffix.
+    spec = importlib.util.spec_from_file_location(
+        "burow_config", path,
+        loader=importlib.machinery.SourceFileLoader("burow_config", str(path)))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
