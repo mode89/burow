@@ -55,6 +55,7 @@ The following files are optional and load in order:
 1. `$XDG_CONFIG_HOME/burow/config.py`, or `~/.config/burow/config.py` when `XDG_CONFIG_HOME` is unset.
 2. `./.burow/config.py` for shared project configuration.
 3. `./.burow/config.local.py` for local project configuration.
+4. Every path given with `--config`, in the order given.
 
 A config file imports `burow` and overrides a function. The override receives the previous implementation, which lets global, project, and local configuration compose.
 
@@ -109,6 +110,20 @@ def add_toolchain(previous):
 ```
 
 An override can replace a function completely by not calling `previous`. Bubblewrap option order is significant, so inspect `bwrap_options()` before replacing defaults or adding mounts that overlap them.
+
+### Extra config files
+
+`--config <path>` loads another config file after the three above, so it can override them. Repeat the option to load several files. The path must exist; burow stops with an error if it does not.
+
+```sh
+burow --config ci/sandbox.py npm test
+```
+
+burow reads only the options before the command, so the command keeps its own flags. For a program whose name starts with `-`, run it through `env`:
+
+```sh
+burow env -weird-name
+```
 
 Config directories are added to Python's import path. A config can therefore move helper code into adjacent Python modules.
 

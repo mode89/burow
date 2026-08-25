@@ -18,6 +18,9 @@ Configuration is trusted Python executed on the host before the sandbox starts. 
 1. `$XDG_CONFIG_HOME/burow/config.py`, defaulting to `~/.config/burow/config.py`.
 2. `./.burow/config.py`.
 3. `./.burow/config.local.py`.
+4. Every path passed with `--config`, in the order given.
+
+`main()` reads options only until the first argument that is not an option; the rest is the command.
 
 Each file can `import burow` and use `@burow.override` to wrap a function. The wrapper receives the previous implementation as its first argument, so later files wrap earlier files. A wrapper may call the previous function to extend it or omit that call to replace it.
 
@@ -51,6 +54,11 @@ write_config "$tmp/xdg/burow/config.py" global
 write_config "$tmp/project/.burow/config.py" project
 write_config "$tmp/project/.burow/config.local.py" local
 (cd "$tmp/project" && XDG_CONFIG_HOME="$tmp/xdg" "$repo/burow" sh -c 'test "$BUROW_CONFIG_ORDER" = local')
+
+write_config "$tmp/extra.py" extra
+(cd "$tmp/project" && XDG_CONFIG_HOME="$tmp/xdg" "$repo/burow" --config "$tmp/extra.py" sh -c 'test "$BUROW_CONFIG_ORDER" = extra')
+./burow --config /nonexistent.py true; echo $?   # 1, config not found
+./burow --bogus true; echo $?                    # 1, unknown option
 ```
 
 Isolation, networking, nested Nix, and exit status:

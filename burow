@@ -19,8 +19,8 @@ USER_CACHE_DIR = Path(
 
 
 def main():
-    load_config()
-    program = ["bash"] if len(sys.argv) == 1 else sys.argv[1:]
+    extra_configs, program = parse_arguments(sys.argv[1:])
+    load_config(extra_configs)
     bwrap = ["bwrap", *bwrap_options(), *program]
     command = f"exec {shlex.join(bwrap)}"
     os.execvp("nix-shell", [
@@ -30,7 +30,28 @@ def main():
     ])
 
 
-def load_config():
+def parse_arguments(args):
+    """Split leading burow options from the command to run. Parsing stops at
+    the first argument that is not an option, so the command keeps its own
+    flags."""
+    configs = []
+    while args and args[0].startswith("-"):
+        option, sep, inline = args[0].partition("=")
+        if option != "--config":
+            sys.exit(f"burow: unknown option {args[0]}")
+        if sep:
+            value, args = inline, args[1:]
+        elif len(args) > 1:
+            value, args = args[1], args[2:]
+        else:
+            sys.exit("burow: --config requires a path")
+        if not value:
+            sys.exit("burow: --config requires a path")
+        configs.append(Path(value).resolve())
+    return configs, list(args) or ["bash"]
+
+
+def load_config(extra_paths=()):
     # Alias so config's `import burow` finds us, not a second instance.
     sys.modules.setdefault("burow", sys.modules[__name__])
     project_dir = Path.cwd() / ".burow"
@@ -43,6 +64,10 @@ def load_config():
     for path in paths:
         if path.exists():
             exec_config(path)
+    for path in extra_paths:
+        if not path.exists():
+            sys.exit(f"burow: config not found: {path}")
+        exec_config(path)
 
 
 def exec_config(path):
