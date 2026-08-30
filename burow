@@ -1,162 +1,123 @@
-#!/usr/bin/env python3
+#!/usr/bin/env nix-shell
+#!nix-shell -i bb -p babashka bubblewrap
+;; vim: set filetype=clojure:
 
-# pylint: disable=missing-docstring
+(ns burow
+  (:require [babashka.classpath :as classpath]
+            [babashka.fs :as fs]
+            [babashka.process :as process]
+            [clojure.string :as string]))
 
-import functools
-import importlib.machinery
-import importlib.util
-import os
-import shlex
-import shutil
-import sys
-from pathlib import Path
+(def xdg-config-home
+  (fs/path (or (System/getenv "XDG_CONFIG_HOME")
+               (fs/path (System/getProperty "user.home") ".config"))))
+(def user-config-dir (fs/path xdg-config-home "burow"))
 
+(declare parse-arguments load-config load-config-file bwrap-options
+         install-override! user-id required-environment canonical-path fail)
 
-XDG_CONFIG_HOME = Path(
-    os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-USER_CONFIG_DIR = XDG_CONFIG_HOME / "burow"
-USER_CACHE_DIR = Path(
-    os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "burow"
+(defn main [args]
+  (let [[extra-configs program] (parse-arguments args)]
+    (load-config extra-configs)
+    (apply process/exec "bwrap" (concat (bwrap-options) program))))
 
+(defn parse-arguments [args]
+  (loop [configs []
+         remaining args]
+    (if (and (seq remaining) (string/starts-with? (first remaining) "-"))
+      (let [argument (first remaining)
+            [option inline] (string/split argument #"=" 2)
+            inline? (string/includes? argument "=")]
+        (when-not (= option "--config")
+          (fail (str "unknown option " argument)))
+        (let [[value rest-args]
+              (cond
+                inline? [inline (rest remaining)]
+                (next remaining) [(second remaining) (nnext remaining)]
+                :else (fail "--config requires a path"))]
+          (when (empty? value)
+            (fail "--config requires a path"))
+          (recur (conj configs (canonical-path value)) rest-args)))
+      [configs (if (seq remaining) remaining ["bash"])])))
 
-def main():
-    extra_configs, program = parse_arguments(sys.argv[1:])
-    load_config(extra_configs)
-    bwrap = ["bwrap", *bwrap_options(), *program]
-    command = f"exec {shlex.join(bwrap)}"
-    os.execvp("nix-shell", [
-        "nix-shell",
-        "--packages", *nix_shell_packages(),
-        "--run", command,
-    ])
+(defn load-config [extra-paths]
+  (let [project-dir (fs/path (fs/cwd) ".burow")
+        default-paths [(fs/path user-config-dir "config.clj")
+                       (fs/path project-dir "config.clj")
+                       (fs/path project-dir "config.local.clj")]]
+    (doseq [path default-paths
+            :when (fs/exists? path)]
+      (load-config-file path))
+    (doseq [path extra-paths]
+      (when-not (fs/exists? path)
+        (fail (str "config not found: " path)))
+      (load-config-file path))))
 
+(defn load-config-file [path]
+  (classpath/add-classpath (str (fs/parent path)))
+  (load-file (str path)))
 
-def parse_arguments(args):
-    """Split leading burow options from the command to run. Parsing stops at
-    the first argument that is not an option, so the command keeps its own
-    flags."""
-    configs = []
-    while args and args[0].startswith("-"):
-        option, sep, inline = args[0].partition("=")
-        if option != "--config":
-            sys.exit(f"burow: unknown option {args[0]}")
-        if sep:
-            value, args = inline, args[1:]
-        elif len(args) > 1:
-            value, args = args[1], args[2:]
-        else:
-            sys.exit("burow: --config requires a path")
-        if not value:
-            sys.exit("burow: --config requires a path")
-        configs.append(Path(value).resolve())
-    return configs, list(args) or ["bash"]
+(defn bwrap-options []
+  (let [cert "/etc/ssl/certs/ca-certificates.crt"
+        home (System/getProperty "user.home")
+        cwd (str (fs/cwd))
+        nix-conf (canonical-path "/etc/nix/nix.conf")
+        dbus (str "/run/user/" (user-id) "/bus")]
+    ["--unshare-all"
+     "--die-with-parent"
+     "--share-net"
+     "--ro-bind" "/etc/passwd" "/etc/passwd"
+     "--ro-bind" "/etc/resolv.conf" "/etc/resolv.conf"
+     "--ro-bind" cert cert
+     "--proc" "/proc"
+     "--dev" "/dev"
+     "--dev-bind" "/dev/kvm" "/dev/kvm"
+     "--tmpfs" "/tmp"
+     "--setenv" "TMPDIR" "/tmp"
+     "--ro-bind" "/nix/store" "/nix/store"
+     "--bind" "/nix/var/nix/daemon-socket" "/nix/var/nix/daemon-socket"
+     "--ro-bind" "/nix/var/nix/profiles" "/nix/var/nix/profiles"
+     "--ro-bind" nix-conf "/etc/nix/nix.conf"
+     "--ro-bind" "/run/current-system/sw" "/run/current-system/sw"
+     "--setenv" "NIX_REMOTE" "daemon"
+     "--ro-bind" "/usr/bin/env" "/usr/bin/env"
+     "--ro-bind" "/bin/sh" "/bin/sh"
+     "--tmpfs" home
+     "--setenv" "HOME" home
+     "--setenv" "USER" (required-environment "USER")
+     "--setenv" "PS1" "[burow] \\w \\$ "
+     "--bind" dbus dbus
+     "--setenv" "DBUS_SESSION_BUS_ADDRESS" (str "unix:path=" dbus)
+     "--bind" cwd cwd
+     "--chdir" cwd]))
 
+(defmacro override [target bindings & body]
+  `(install-override! (var ~target) (fn ~bindings ~@body)))
 
-def load_config(extra_paths=()):
-    # Alias so config's `import burow` finds us, not a second instance.
-    sys.modules.setdefault("burow", sys.modules[__name__])
-    project_dir = Path.cwd() / ".burow"
-    # Later wins: project dir over global, config.local.py over config.py.
-    paths = [
-        USER_CONFIG_DIR / "config.py",
-        project_dir / "config.py",
-        project_dir / "config.local.py",
-    ]
-    for path in paths:
-        if path.exists():
-            exec_config(path)
-    for path in extra_paths:
-        if not path.exists():
-            sys.exit(f"burow: config not found: {path}")
-        exec_config(path)
+(defn install-override! [target wrapper]
+  (alter-var-root
+   target
+   (fn [previous]
+     (when-not (ifn? previous)
+       (throw (IllegalArgumentException.
+               (str "override target is not a function: " target))))
+     (fn [& args]
+       (apply wrapper previous args)))))
 
+(defn user-id []
+  (string/trim (:out (process/shell {:out :string} "id" "-u"))))
 
-def exec_config(path):
-    sys.path.append(str(path.parent))
-    # An explicit loader accepts config files without a `.py` suffix.
-    spec = importlib.util.spec_from_file_location(
-        "burow_config", path,
-        loader=importlib.machinery.SourceFileLoader("burow_config", str(path)))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+(defn required-environment [name]
+  (or (System/getenv name)
+      (throw (IllegalStateException.
+              (str "required environment variable is not set: " name)))))
 
+(defn canonical-path [path]
+  (.getCanonicalPath (java.io.File. (str path))))
 
-def bwrap_options():
-    cert = "/etc/ssl/certs/ca-certificates.crt"
-    home = Path.home()
-    cwd = Path.cwd()
-    nix_conf = os.path.realpath("/etc/nix/nix.conf")
-    dbus = f"/run/user/{os.getuid()}/bus"
-    return [
-        "--unshare-all",
-        "--die-with-parent",
-        "--share-net",
-        "--ro-bind", "/etc/passwd", "/etc/passwd",
-        "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
-        "--ro-bind", cert, cert,
-        "--proc", "/proc",
-        "--dev", "/dev",
-        "--dev-bind", "/dev/kvm", "/dev/kvm",
-        "--tmpfs", "/tmp",
-        "--setenv", "TMPDIR", "/tmp",
-        "--ro-bind", "/nix/store", "/nix/store",
-        "--bind", "/nix/var/nix/daemon-socket", "/nix/var/nix/daemon-socket",
-        "--ro-bind", "/nix/var/nix/profiles", "/nix/var/nix/profiles",
-        "--ro-bind", nix_conf, "/etc/nix/nix.conf",
-        "--ro-bind", "/run/current-system/sw", "/run/current-system/sw",
-        "--setenv", "NIX_REMOTE", "daemon",
-        "--ro-bind", "/usr/bin/env", "/usr/bin/env",
-        "--ro-bind", "/bin/sh", "/bin/sh",
-        "--tmpfs", str(home),
-        "--setenv", "HOME", str(home),
-        "--setenv", "USER", os.environ["USER"],
-        "--setenv", "PS1", r"[burow] \w \$ ",
-        "--bind", dbus, dbus,
-        "--setenv", "DBUS_SESSION_BUS_ADDRESS", f"unix:path={dbus}",
-        "--bind", str(cwd), str(cwd),
-        "--chdir", str(cwd),
-    ]
+(defn fail [message]
+  (binding [*out* *err*]
+    (println (str "burow: " message)))
+  (System/exit 1))
 
-
-def nix_shell_packages():
-    return [
-        "bubblewrap",
-    ]
-
-
-def override(arg):
-    """Replace a function, injecting the previous version as the first argument
-    so overrides can chain. Used as ``@burow.override`` (replaces
-    ``burow.<name>``) or ``@burow.override(target)`` (replaces
-    ``target`` wherever it lives)."""
-    if not callable(arg):
-        raise TypeError(
-            f"@burow.override expects a function; "
-            f"got {type(arg).__name__}")
-    home = sys.modules.get(arg.__module__)
-    if home is not None and getattr(home, arg.__name__, None) is arg:
-        return lambda fn: _install(home, arg.__name__, arg, fn)
-    ps_module = sys.modules[__name__]
-    if not hasattr(ps_module, arg.__name__):
-        raise AttributeError(
-            f"burow has no attribute {arg.__name__!r}; for targets "
-            f"outside burow, use the explicit form: "
-            f"@burow.override(<module>.{arg.__name__})")
-    return _install(
-        ps_module, arg.__name__, getattr(ps_module, arg.__name__), arg)
-
-
-def _install(module, name, target, fn):
-    """Install `fn` at `module.name`, with `target` curried as first arg."""
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        return fn(target, *args, **kwargs)
-    # Rewrite so a later @burow.override(wrapper) routes here, not to fn's
-    # original module.
-    wrapper.__module__ = module.__name__
-    setattr(module, name, wrapper)
-    return wrapper
-
-
-if __name__ == "__main__":
-    main()
+(main *command-line-args*)

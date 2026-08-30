@@ -1,43 +1,38 @@
 # Working on burow
 
-`burow <cmd>` runs `<cmd>` directly under `bwrap`, with the current directory as the only persistent writable filesystem bind. `nix-shell` provides Bubblewrap at launch time.
+`burow <cmd>` runs `<cmd>` directly under `bwrap`, with the current directory as the only persistent writable filesystem bind. A `nix-shell` shebang provides Babashka and Bubblewrap at launch time.
 
 The project has one executable and no build step or test framework:
 
-- `burow` — Python. Loads configuration, defines the sandbox policy, asks `nix-shell` for runtime packages, and replaces itself with the sandboxed command.
+- `burow` — Clojure evaluated by Babashka. Loads configuration, defines the sandbox policy, and replaces itself with the sandboxed command.
 - `README.md` — user documentation and configuration examples.
 - `AGENTS.md` — maintainer instructions.
 - `MEMORY.md` — curated context that is not recoverable cheaply from the other files.
 
-Sandbox policy belongs in `bwrap_options()`. Packages needed to start the sandbox belong in `nix_shell_packages()`. Keep configuration loading in `load_config()` and process launch in `main()`.
+Sandbox policy belongs in `bwrap-options`. Keep configuration loading in `load-config` and process launch in `main`. Babashka and Bubblewrap are fixed packages in the `nix-shell` shebang.
 
 ## Configuration model
 
-Configuration is trusted Python executed on the host before the sandbox starts. Files load in this order:
+Configuration is trusted Clojure evaluated on the host before the sandbox starts. Files load in this order:
 
-1. `$XDG_CONFIG_HOME/burow/config.py`, defaulting to `~/.config/burow/config.py`.
-2. `./.burow/config.py`.
-3. `./.burow/config.local.py`.
+1. `$XDG_CONFIG_HOME/burow/config.clj`, defaulting to `~/.config/burow/config.clj`.
+2. `./.burow/config.clj`.
+3. `./.burow/config.local.clj`.
 4. Every path passed with `--config`, in the order given.
 
-`main()` reads options only until the first argument that is not an option; the rest is the command.
+Old `config.py` files are ignored. `main` reads options only until the first argument that is not an option; the rest is the command.
 
-Each file can `import burow` and use `@burow.override` to wrap a function. The wrapper receives the previous implementation as its first argument, so later files wrap earlier files. A wrapper may call the previous function to extend it or omit that call to replace it.
+Each file declares a namespace, requires `[burow :as burow]`, and can use `burow/override` to wrap a function. The binding vector receives the previous implementation first, followed by the target function's arguments. Later files wrap earlier files. A wrapper may call the previous function to extend it or omit that call to replace it. Config directories are added to the Babashka classpath so adjacent helper namespaces can be required.
 
 ## Verify
 
 There are no unit tests. Run these after a change.
 
-Python and documentation syntax:
+Clojure and documentation syntax:
 
 ```sh
-python3 -m py_compile burow
-python3 - <<'PY'
-import re
-from pathlib import Path
-for block in re.findall(r'```python\n(.*?)```', Path('README.md').read_text(), re.S):
-    compile(block, 'README.md', 'exec')
-PY
+./burow --bogus true; test $? -eq 1
+nix-shell -p babashka --run "bb -e '(let [text (slurp \"README.md\") blocks (map second (re-seq (re-pattern \"(?s)\`\`\`clojure\\n(.*?)\`\`\`\") text))] (doseq [block blocks] (read-string (str \"(\" block \"\\n)\"))))'"
 ```
 
 Configuration order and override chaining:
@@ -48,17 +43,17 @@ tmp=$(mktemp -d -p "$repo")
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/xdg/burow" "$tmp/project/.burow"
 write_config() {
-    printf 'import burow\n@burow.override\ndef bwrap_options(previous):\n    return [*previous(), "--setenv", "BUROW_CONFIG_ORDER", "%s"]\n' "$2" > "$1"
+    printf '(ns config.%s (:require [burow :as burow]))\n(burow/override burow/bwrap-options [previous]\n  (into (previous) ["--setenv" "BUROW_CONFIG_ORDER" "%s"]))\n' "$2" "$2" > "$1"
 }
-write_config "$tmp/xdg/burow/config.py" global
-write_config "$tmp/project/.burow/config.py" project
-write_config "$tmp/project/.burow/config.local.py" local
+write_config "$tmp/xdg/burow/config.clj" global
+write_config "$tmp/project/.burow/config.clj" project
+write_config "$tmp/project/.burow/config.local.clj" local
 (cd "$tmp/project" && XDG_CONFIG_HOME="$tmp/xdg" "$repo/burow" sh -c 'test "$BUROW_CONFIG_ORDER" = local')
 
-write_config "$tmp/extra.py" extra
-(cd "$tmp/project" && XDG_CONFIG_HOME="$tmp/xdg" "$repo/burow" --config "$tmp/extra.py" sh -c 'test "$BUROW_CONFIG_ORDER" = extra')
-./burow --config /nonexistent.py true; echo $?   # 1, config not found
-./burow --bogus true; echo $?                    # 1, unknown option
+write_config "$tmp/extra.clj" extra
+(cd "$tmp/project" && XDG_CONFIG_HOME="$tmp/xdg" "$repo/burow" --config "$tmp/extra.clj" sh -c 'test "$BUROW_CONFIG_ORDER" = extra')
+./burow --config /nonexistent.clj true; echo $?   # 1, config not found
+./burow --bogus true; echo $?                     # 1, unknown option
 ```
 
 Isolation, networking, nested Nix, and exit status:
@@ -79,9 +74,9 @@ Run an interactive command such as `./burow htop` from a real terminal after cha
 
 ## Things that will mislead you
 
-**Configuration is outside the security boundary.** Config files are imported before `bwrap` starts and can run arbitrary host code. Treat project configuration as trusted code.
+**Configuration is outside the security boundary.** Config files are evaluated before `bwrap` starts and can run arbitrary host code. Treat project configuration as trusted code.
 
-**The environment is inherited.** Files in the host home are hidden, but credentials already stored in environment variables remain visible unless configuration changes the environment.
+**The environment is inherited.** Files in the host home are hidden, but credentials already stored in environment variables remain visible unless configuration changes the Bubblewrap environment.
 
 **The default host paths are strict.** Launch fails if a source used by `--bind`, `--ro-bind`, or `--dev-bind` does not exist. The defaults assume NixOS paths, `/dev/kvm`, and an active user D-Bus socket.
 
@@ -93,12 +88,12 @@ Run an interactive command such as `./burow htop` from a real terminal after cha
 
 **`$HOME` and `/tmp` are disposable mounts.** Writes there can succeed but disappear when the command exits. Put test fixtures in the project directory if a later sandbox command must see them.
 
-**Bubblewrap option order matters.** Configuration normally appends options to the previous list. Check how a later mount or namespace option interacts with the defaults before assuming it replaces one.
+**Bubblewrap option order matters.** Configuration normally appends options to the previous vector. Check how a later mount or namespace option interacts with the defaults before assuming it replaces one.
 
 ## Documentation style
 
-No Markdown tables; use lists. Do not hard-wrap lines. Every Python example must compile.
+No Markdown tables; do not hard-wrap lines. Every Clojure example must parse.
 
 ---
 
-**Memory — read first.** Read `MEMORY.md` at the start of each session, before your first response — it records facts about this project, its conventions, landmines, dead ends, and decision rationale you can't recover from the code. Skipping it risks repeating solved mistakes.
+**Memory — read first.** Read `MEMORY.md` at the start of each session, before your first response. It records facts about this project, its conventions, landmines, dead ends, and decision rationale that cannot be recovered cheaply from the code.

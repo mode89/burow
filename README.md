@@ -31,11 +31,11 @@ This is a convenience-first sandbox that limits accidental filesystem access. It
 
 The defaults target NixOS and require:
 
-- Python 3 and a populated `USER` environment variable.
 - Nix with `nix-shell`, `<nixpkgs>` available through the legacy Nix path, and a multi-user daemon socket at `/nix/var/nix/daemon-socket`.
+- A populated `USER` environment variable.
 - A Linux kernel with user namespaces.
 - `/dev/kvm` and an active user D-Bus socket at `/run/user/$UID/bus`.
-- The NixOS paths bound by `bwrap_options()`, including the CA certificate, Nix configuration and profiles, `/run/current-system/sw`, `/usr/bin/env`, and `/bin/sh`.
+- The NixOS paths bound by `bwrap-options`, including the certificate authority file, Nix configuration and profiles, `/run/current-system/sw`, `/usr/bin/env`, and `/bin/sh`.
 
 Install the single executable:
 
@@ -44,79 +44,67 @@ git clone <this repo> ~/src/burow
 ln -s ~/src/burow/burow ~/.local/bin/burow
 ```
 
-Each invocation uses `nix-shell --packages bubblewrap` and then replaces itself with `bwrap`. The first run may download Bubblewrap; later runs reuse the Nix store.
+The executable uses a `nix-shell` shebang to provide Babashka and Bubblewrap from the host's unpinned `<nixpkgs>`. The first run may download them; later runs reuse the Nix store. Babashka loads configuration and then replaces itself directly with Bubblewrap.
 
 ## Configuration
 
-Configuration is Python. It runs on the host before the sandbox starts, so use configuration only from projects you trust.
+Configuration is Clojure evaluated by Babashka. It runs on the host before the sandbox starts, so use configuration only from projects you trust.
 
 The following files are optional and load in order:
 
-1. `$XDG_CONFIG_HOME/burow/config.py`, or `~/.config/burow/config.py` when `XDG_CONFIG_HOME` is unset.
-2. `./.burow/config.py` for shared project configuration.
-3. `./.burow/config.local.py` for local project configuration.
+1. `$XDG_CONFIG_HOME/burow/config.clj`, or `~/.config/burow/config.clj` when `XDG_CONFIG_HOME` is unset.
+2. `./.burow/config.clj` for shared project configuration.
+3. `./.burow/config.local.clj` for local project configuration.
 4. Every path given with `--config`, in the order given.
 
-A config file imports `burow` and overrides a function. The override receives the previous implementation, which lets global, project, and local configuration compose.
+Old `config.py` files are ignored.
+
+A config file declares its namespace, requires `burow`, and overrides a function. The override receives the previous implementation, which lets global, project, and local configuration compose.
 
 Add a read-only host path:
 
-```python
-import burow
+```clojure
+(ns burow.config
+  (:require [burow :as burow]))
 
-
-@burow.override
-def bwrap_options(previous):
-    return [
-        *previous(),
-        "--ro-bind", "/opt/toolchain", "/opt/toolchain",
-    ]
-```
-
-Add packages to the outer `nix-shell`, making their programs available through `PATH` inside the sandbox:
-
-```python
-import burow
-
-
-@burow.override
-def nix_shell_packages(previous):
-    return [*previous(), "nodejs_22"]
+(burow/override burow/bwrap-options [previous]
+  (into (previous)
+        ["--ro-bind" "/opt/toolchain" "/opt/toolchain"]))
 ```
 
 Disable network access. `--unshare-all` already creates a network namespace; this removes the later option that shares the host network:
 
-```python
-import burow
+```clojure
+(ns burow.config
+  (:require [burow :as burow]))
 
-
-@burow.override
-def bwrap_options(previous):
-    return [option for option in previous() if option != "--share-net"]
+(burow/override burow/bwrap-options [previous]
+  (remove #(= % "--share-net") (previous)))
 ```
 
-Use the explicit decorator form when the wrapper has a different name:
+An override can replace a function completely by not calling `previous`:
 
-```python
-import burow
+```clojure
+(ns burow.config
+  (:require [burow :as burow]))
 
-
-@burow.override(burow.bwrap_options)
-def add_toolchain(previous):
-    return [
-        *previous(),
-        "--ro-bind", "/opt/toolchain", "/opt/toolchain",
-    ]
+(burow/override burow/bwrap-options [_previous]
+  ["--unshare-all"
+   "--die-with-parent"
+   "--bind" (str (babashka.fs/cwd)) (str (babashka.fs/cwd))
+   "--chdir" (str (babashka.fs/cwd))])
 ```
 
-An override can replace a function completely by not calling `previous`. Bubblewrap option order is significant, so inspect `bwrap_options()` before replacing defaults or adding mounts that overlap them.
+`override` accepts any function Var, including a Var from another namespace. The binding vector contains the previous function followed by the target function's arguments. Bubblewrap option order is significant, so inspect `bwrap-options` before replacing defaults or adding mounts that overlap them.
+
+Each config directory is added to the Babashka classpath before the config loads. A config can therefore move helper code into adjacent Clojure namespaces.
 
 ### Extra config files
 
-`--config <path>` loads another config file after the three above, so it can override them. Repeat the option to load several files. The path must exist; burow stops with an error if it does not.
+`--config <path>` loads another Clojure config file after the three default files, so it can override them. Repeat the option to load several files. The path must exist; burow stops with an error if it does not. The file suffix does not affect how the file is evaluated.
 
 ```sh
-burow --config ci/sandbox.py npm test
+burow --config ci/sandbox.clj npm test
 ```
 
 burow reads only the options before the command, so the command keeps its own flags. For a program whose name starts with `-`, run it through `env`:
@@ -125,14 +113,13 @@ burow reads only the options before the command, so the command keeps its own fl
 burow env -weird-name
 ```
 
-Config directories are added to Python's import path. A config can therefore move helper code into adjacent Python modules.
-
 ## How it works
 
-1. `burow` imports the global, project, and local Python configuration files that exist.
-2. It gets Bubblewrap arguments from `bwrap_options()` and packages from `nix_shell_packages()`.
-3. It runs `nix-shell --packages ... --run ...` to provide Bubblewrap.
-4. Bubblewrap requests isolation for every supported namespace, then shares the host network and mounts the allowed paths. User and cgroup namespace creation are best-effort Bubblewrap operations.
-5. The requested command runs directly under Bubblewrap in the current directory.
+1. The `nix-shell` shebang starts Babashka with Babashka and Bubblewrap on `PATH`.
+2. burow evaluates the global, project, and local Clojure configuration files that exist.
+3. It gets Bubblewrap arguments from `bwrap-options`.
+4. Babashka replaces itself directly with Bubblewrap.
+5. Bubblewrap requests isolation for every supported namespace, then shares the host network and mounts the allowed paths. User and cgroup namespace creation are best-effort Bubblewrap operations.
+6. The requested command runs directly under Bubblewrap in the current directory.
 
 Exit codes and signals pass through. Interactive programs use the calling terminal directly.
