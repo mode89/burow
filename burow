@@ -13,13 +13,14 @@
                (fs/path (System/getProperty "user.home") ".config"))))
 (def user-config-dir (fs/path xdg-config-home "burow"))
 
-(declare parse-arguments load-config load-config-file bwrap-options
-         install-override! user-id required-environment canonical-path fail)
+(declare parse-arguments load-config load-config-file
+         bwrap-options-with-cwd bwrap-options install-override!
+         user-id required-environment canonical-path fail)
 
 (defn main [args]
   (let [[extra-configs program] (parse-arguments args)]
     (load-config extra-configs)
-    (apply process/exec "bwrap" (concat (bwrap-options) program))))
+    (apply process/exec "bwrap" (concat (bwrap-options-with-cwd) program))))
 
 (defn parse-arguments [args]
   (loop [configs []
@@ -57,10 +58,14 @@
   (classpath/add-classpath (str (fs/parent path)))
   (load-file (str path)))
 
+(defn bwrap-options-with-cwd []
+  (let [cwd (str (fs/cwd))]
+    (into ["--chdir" cwd]
+          (concat (bwrap-options) ["--bind" cwd cwd]))))
+
 (defn bwrap-options []
   (let [cert "/etc/ssl/certs/ca-certificates.crt"
         home (System/getProperty "user.home")
-        cwd (str (fs/cwd))
         nix-conf (canonical-path "/etc/nix/nix.conf")
         dbus (str "/run/user/" (user-id) "/bus")]
     ["--unshare-all"
@@ -87,9 +92,7 @@
      "--setenv" "USER" (required-environment "USER")
      "--setenv" "PS1" "[burow] \\w \\$ "
      "--bind" dbus dbus
-     "--setenv" "DBUS_SESSION_BUS_ADDRESS" (str "unix:path=" dbus)
-     "--bind" cwd cwd
-     "--chdir" cwd]))
+     "--setenv" "DBUS_SESSION_BUS_ADDRESS" (str "unix:path=" dbus)]))
 
 (defmacro override [target bindings & body]
   `(install-override! (var ~target) (fn ~bindings ~@body)))

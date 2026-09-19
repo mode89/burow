@@ -90,12 +90,12 @@ An override can replace a function completely by not calling `previous`:
 
 (burow/override burow/bwrap-options [_previous]
   ["--unshare-all"
-   "--die-with-parent"
-   "--bind" (str (babashka.fs/cwd)) (str (babashka.fs/cwd))
-   "--chdir" (str (babashka.fs/cwd))])
+   "--die-with-parent"])
 ```
 
 `override` accepts any function Var, including a Var from another namespace. The binding vector contains the previous function followed by the target function's arguments. Bubblewrap option order is significant, so inspect `bwrap-options` before replacing defaults or adding mounts that overlap them.
+
+`bwrap-options-with-cwd` places `--chdir` and the current directory before the configured `bwrap-options`, so the directory appears near the start of the process arguments. It appends `--bind` for the current directory after those options to restore writable access after extension mounts. Separate mounts beneath that directory can still remain read-only. Replacing `bwrap-options` does not remove these directory options; override `bwrap-options-with-cwd` to change them.
 
 Each config directory is added to the Babashka classpath before the config loads. A config can therefore move helper code into adjacent Clojure namespaces.
 
@@ -117,7 +117,7 @@ burow env -weird-name
 
 1. The `nix-shell` shebang starts Babashka with Babashka and Bubblewrap on `PATH`.
 2. burow evaluates the global, project, and local Clojure configuration files that exist.
-3. It gets Bubblewrap arguments from `bwrap-options`.
+3. It gets Bubblewrap arguments from `bwrap-options-with-cwd`, which wraps the configured `bwrap-options` with the current-directory options.
 4. Babashka replaces itself directly with Bubblewrap.
 5. Bubblewrap requests isolation for every supported namespace, then shares the host network and mounts the allowed paths. User and cgroup namespace creation are best-effort Bubblewrap operations.
 6. The requested command runs directly under Bubblewrap in the current directory.

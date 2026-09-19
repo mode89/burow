@@ -90,10 +90,14 @@ Run an interactive command such as `./burow htop` from a real terminal after cha
 
 **Bubblewrap option order matters.** Configuration normally appends options to the previous vector. Check how a later mount or namespace option interacts with the defaults before assuming it replaces one.
 
+## Code style
+
+Keep Clojure code within 80 columns.
+
 ## Documentation style
 
 No Markdown tables; do not hard-wrap lines. Every Clojure example must parse.
 
 ---
 
-**Memory — read first.** Read `MEMORY.md` at the start of each session, before your first response. It records facts about this project, its conventions, landmines, dead ends, and decision rationale that cannot be recovered cheaply from the code.
+**Memory — read first.** Read `MEMORY.md` at the start of each session, before your first response — it records facts about this project, its conventions, landmines, dead ends, and decision rationale the repository alone can't establish. Skipping it risks repeating solved mistakes.
